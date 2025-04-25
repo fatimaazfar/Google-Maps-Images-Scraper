@@ -92,7 +92,7 @@ def save_url_to_csv(self, csv_path, url, index):
     except Exception as e:
         logger.error(f"Error saving URL to CSV: {str(e)}")
         return False
-
+    
 class GoogleMapsImageScraper:
     def __init__(self, headless=True, download_dir="downloaded_images", timeout=30, save_csv=True):
         """
@@ -852,20 +852,48 @@ class GoogleMapsImageScraper:
             filename = f"{self._sanitize_filename(location_name)}_{index}{ext}"
             filepath = os.path.join(location_dir, filename)
             
+            # Log download attempt
+            logger.debug(f"Attempting to download: {url[:50]}... to {filepath}")
+            
             # Download the image with timeout and headers
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Referer': 'https://www.google.com/maps'
             }
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
             
+            # Use requests with retry mechanism
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    break
+                except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                    if retry < max_retries - 1:
+                        logger.warning(f"Retry {retry+1}/{max_retries} for image {index}: {str(e)}")
+                        time.sleep(2)  # Wait before retry
+                    else:
+                        raise
+            
+            # If file exists, don't overwrite
+            if os.path.exists(filepath):
+                logger.info(f"File already exists, skipping: {filename}")
+                return True
+                
             # Save the image
             with open(filepath, 'wb') as f:
                 f.write(response.content)
                 
-            logger.info(f"Successfully downloaded: {filename}")
-            return True
+            # Check if file was created successfully
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                logger.info(f"Successfully downloaded: {filename}")
+                # Print first few and periodic updates
+                if index <= 5 or index % 10 == 0:
+                    print(f"Downloaded image #{index}: {filename}")
+                return True
+            else:
+                logger.error(f"File was not created or is empty: {filepath}")
+                return False
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Error downloading image {index}: {str(e)}")
@@ -891,6 +919,7 @@ class GoogleMapsImageScraper:
             return 0
             
         logger.info(f"Starting download of {len(image_urls)} images with {max_workers} workers")
+        print(f"Starting download of {len(image_urls)} images with {max_workers} workers")
         
         successful_downloads = 0
         
@@ -900,12 +929,17 @@ class GoogleMapsImageScraper:
             for i, url in enumerate(image_urls):
                 futures.append(executor.submit(self.download_image, url, location_name, i+1))
                 
-            # Collect results
-            for future in futures:
+            # Collect results with progress updates
+            for i, future in enumerate(futures):
                 if future.result():
                     successful_downloads += 1
+                
+                # Print progress
+                if (i+1) % 5 == 0 or i+1 == len(futures):
+                    print(f"Downloaded {successful_downloads}/{i+1} images...")
                     
         logger.info(f"Successfully downloaded {successful_downloads} out of {len(image_urls)} images")
+        print(f"Successfully downloaded {successful_downloads} out of {len(image_urls)} images")
         return successful_downloads
 
     def _sanitize_filename(self, filename):
